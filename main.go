@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"path"
 	"strconv"
 
 	"github.com/elazarl/goproxy"
@@ -21,13 +23,23 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 	gemipfs "github.com/willscott/go-gemipfs/lib"
+	"github.com/willscott/go-gemipfs/router"
 )
 
 func main() {
 	verbose := flag.Bool("v", false, "should every proxy request be logged to stdout")
 	addr := flag.String("addr", ":8080", "proxy listen address")
-	remote := flag.String("remote", "127.0.0.1:8081", "where the resolver lives")
+	resolverAddr := flag.String("remote", "127.0.0.1:8081", "where the resolver lives")
+	repoAddr := flag.String("repo", "http://127.0.0.1:8082", "where the repo lives")
+	storeLoc := flag.String("store", "./", "where to store data")
 	flag.Parse()
+
+	storeBaseLoc := path.Join(*storeLoc, ".gemipfs")
+	store := gemipfs.NewCarStore(storeBaseLoc)
+	rConf := router.RouterConfig{
+		Store: store,
+	}
+
 	if err := getOrSetCA(); err != nil {
 		log.Fatal(err)
 		return
@@ -37,14 +49,19 @@ func main() {
 		log.Fatal(err)
 		return
 	}
-	rh, rp, err := net.SplitHostPort(*remote)
+	rh, rp, err := net.SplitHostPort(*resolverAddr)
 	if err != nil {
-		log.Fatalf("could not parse host %s: %v\n", *remote, err)
+		log.Fatalf("could not parse host %s: %v\n", *resolverAddr, err)
 		return
 	}
 	peer, err := connectToPeer(context.Background(), host, rh, rp)
 	if err != nil {
 		log.Fatalf("could not connect: %v\n", err)
+		return
+	}
+	repoUrl, err := url.Parse(*repoAddr)
+	if err != nil {
+		log.Fatalf("couldn't parse repo: %v\n", err)
 		return
 	}
 
@@ -53,7 +70,35 @@ func main() {
 	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		gr := gemipfs.Wrap(req)
-		query, err := gr.ToP2PQuery(peer)
+		decodedQuery, err := gr.Canonicalize().ToP2PQuery()
+		if err != nil {
+			log.Fatalf("could not serialize req to peer: %v\n", err)
+			return nil, nil
+		}
+		contentSearchKey := decodedQuery.DomainHash()
+		contentRouter := router.NewRouter(host, &rConf)
+
+		// First, see if there's an existing repo with the content
+		peers := contentRouter.FindRepos(req.Context(), contentSearchKey)
+		storedResp, err := router.WithFirstToResolve(req.Context(), contentRouter, decodedQuery, peers)
+		if err == nil {
+			// return from an existing repo
+			rb, err := store.Get(storedResp)
+			if err != nil {
+				log.Fatalf("could not retrieve response from store: %v\n", err)
+				return nil, nil
+			}
+			gResp, err := gemipfs.ResponseFromWARC(req, rb)
+			if err != nil {
+				log.Fatalf("could not parse response from store: %v\n", err)
+				return nil, nil
+			}
+			return req, gResp.HTTP(req)
+		}
+
+		// no store identified - use an exit to request the page.
+		decodedQuery.Repo = repoUrl
+		query, err := decodedQuery.EncryptTo(peer)
 		if err != nil {
 			log.Fatalf("could not serialize req to peer: %v\n", err)
 			return nil, nil

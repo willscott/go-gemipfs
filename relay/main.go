@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -11,7 +12,6 @@ import (
 	"strconv"
 
 	"github.com/libp2p/go-libp2p"
-	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	manet "github.com/multiformats/go-multiaddr/net"
 	gemipfs "github.com/willscott/go-gemipfs/lib"
@@ -47,22 +47,23 @@ func main() {
 		log.Fatal(err)
 		return
 	}
+	myID := gemipfs.Attester{
+		Identity: host.Peerstore().PrivKey(host.ID()),
+	}
 
 	exitFunc := func(s network.Stream) {
-		doExit(host, s)
+		doExit(&myID, s)
 	}
 	host.SetStreamHandler("/exit/0.0.1", exitFunc)
 	<-make(chan struct{})
 }
 
-func doExit(h host.Host, s network.Stream) {
-	myKey := h.Peerstore().PrivKey(h.ID())
-
+func doExit(a *gemipfs.Attester, s network.Stream) {
 	q, err := gemipfs.ReadQuery(s)
 	if err != nil {
 		return
 	}
-	dq, err := q.TryDecrypt(myKey)
+	dq, err := q.TryDecrypt(a.Identity)
 	if err != nil {
 		return
 	}
@@ -74,7 +75,16 @@ func doExit(h host.Host, s network.Stream) {
 		return
 	}
 	fmt.Printf("finished request for %s\n", req.URL)
-	resp.Write(s)
+	prf, respBody := a.AttestResponse(resp)
+	// push reponse to repo
+	_, err = http.Post(dq.Repo.String(), "application/octet-stream", bytes.NewReader(respBody))
+	if err != nil {
+		log.Printf("failed to post to repo: %v", err)
+		// failed to write to repo...
+		return
+	}
 
+	// respond with attestation
 	defer s.Close()
+	s.Write(prf.Bytes())
 }

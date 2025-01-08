@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
+	"os"
 	"strings"
 
+	"github.com/CorentinB/warc"
 	"github.com/ipfs/go-cid"
-	"github.com/libp2p/go-libp2p/core/peer"
 	mc "github.com/multiformats/go-multicodec"
 	"github.com/multiformats/go-multihash"
 	cbor "github.com/whyrusleeping/cbor/go"
@@ -74,7 +76,13 @@ func (r *Request) Hash() cid.Cid {
 	return r.Cid
 }
 
-func (r *Request) ToP2PQuery(p peer.ID) (*Query, error) {
+// Canonicalize performs available transformations to try to make it more likely
+// that subequent requests for "the same" content result in the same queries.
+func (r *Request) Canonicalize() *Request {
+	return r
+}
+
+func (r *Request) ToP2PQuery() (*DecodedQuery, error) {
 	sr := r.toSerial()
 	if !r.Cid.Defined() {
 		buf := bytes.NewBuffer(nil)
@@ -83,11 +91,10 @@ func (r *Request) ToP2PQuery(p peer.ID) (*Query, error) {
 		r.Cid = cid.NewCidV1(uint64(mc.Https), mh)
 	}
 
-	dq := &DecodedQuery{
+	return &DecodedQuery{
 		Resource:          r.Cid,
 		serializedRequest: *sr,
-	}
-	return dq.EncryptTo(p)
+	}, nil
 }
 
 func ParseRequest(ctx context.Context, q *DecodedQuery) *Request {
@@ -106,9 +113,37 @@ func ParseRequest(ctx context.Context, q *DecodedQuery) *Request {
 }
 
 func (r *Request) Do(c http.Client) (*Response, error) {
+	dumpRequest, err := httputil.DumpRequest(r.Request, true)
+	if err != nil {
+		return nil, err
+	}
+	rw := bytes.NewReader(dumpRequest)
+	reqArc := warc.NewRecord(os.TempDir(), false)
+	reqArc.Header.Set("WARC-Type", "request")
+	reqArc.Header.Set("WARC-Payload-Digest", "sha1:"+warc.GetSHA1(rw))
+	reqArc.Header.Set("WARC-Target-URI", r.URL.String())
+	reqArc.Header.Set("Host", r.URL.Host)
+	reqArc.Header.Set("Content-Type", "application/http; msgtype=request")
+	reqArc.Content.Write(dumpRequest)
+
 	hr, err := c.Do(r.Request)
 	if err != nil {
 		return nil, err
 	}
-	return ResponseFrom(r.Cid, hr), nil
+
+	dumpResponse, err := httputil.DumpResponse(hr, true)
+	if err != nil {
+		return nil, err
+	}
+	drR := bytes.NewReader(dumpResponse)
+
+	// Add the response to the exchange
+	var respArc = warc.NewRecord(os.TempDir(), false)
+	respArc.Header.Set("WARC-Type", "response")
+	respArc.Header.Set("WARC-Payload-Digest", "sha1:"+warc.GetSHA1(drR))
+	respArc.Header.Set("WARC-Target-URI", hr.Request.URL.String())
+	respArc.Header.Set("Content-Type", "application/http; msgtype=response")
+	respArc.Content.Write(dumpResponse)
+
+	return ResponseFrom(r, hr), nil
 }
