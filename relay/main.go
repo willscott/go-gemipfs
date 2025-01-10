@@ -68,7 +68,10 @@ func doExit(a *gemipfs.Attester, s network.Stream) {
 		return
 	}
 
-	req := gemipfs.ParseRequest(context.Background(), dq)
+	req, err := gemipfs.ParseRequest(context.Background(), dq.Request)
+	if err != nil {
+		return
+	}
 	fmt.Printf("going to req %s\n", req.URL)
 	resp, err := req.Do(*http.DefaultClient)
 	if err != nil {

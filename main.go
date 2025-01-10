@@ -70,17 +70,23 @@ func main() {
 	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		gr := gemipfs.Wrap(req)
-		decodedQuery, err := gr.Canonicalize().ToP2PQuery()
+		request, err := gr.Canonicalize().Serialize()
 		if err != nil {
 			log.Fatalf("could not serialize req to peer: %v\n", err)
 			return nil, nil
 		}
-		contentSearchKey := decodedQuery.DomainHash()
+		contentSearchKey := gr.DomainHash()
+		query, err := gemipfs.DecodedQueryFromRequest(request)
+		if err != nil {
+			log.Fatalf("couldn't transform query: %v\n", err)
+			return nil, nil
+		}
+
 		contentRouter := router.NewRouter(host, &rConf)
 
 		// First, see if there's an existing repo with the content
 		peers := contentRouter.FindRepos(req.Context(), contentSearchKey)
-		storedResp, err := router.WithFirstToResolve(req.Context(), contentRouter, decodedQuery, peers)
+		storedResp, err := router.WithFirstToResolve(req.Context(), contentRouter, query, peers)
 		if err == nil {
 			// return from an existing repo
 			rb, err := store.Get(storedResp)
@@ -97,8 +103,8 @@ func main() {
 		}
 
 		// no store identified - use an exit to request the page.
-		decodedQuery.Repo = repoUrl
-		query, err := decodedQuery.EncryptTo(peer)
+		query.Repo = repoUrl
+		wireQuery, err := query.EncryptTo(peer)
 		if err != nil {
 			log.Fatalf("could not serialize req to peer: %v\n", err)
 			return nil, nil
@@ -111,7 +117,7 @@ func main() {
 			return nil, nil
 		}
 		defer stream.Close()
-		if err := query.Write(stream); err != nil {
+		if err := wireQuery.Write(stream); err != nil {
 			log.Fatal(err)
 			return nil, nil
 		}

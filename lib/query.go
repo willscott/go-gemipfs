@@ -21,9 +21,9 @@ type Query struct {
 }
 
 type DecodedQuery struct {
-	Resource          cid.Cid
-	Repo              *url.URL
-	serializedRequest req
+	Resource cid.Cid
+	Repo     *url.URL
+	Request  serializedRequest
 }
 
 func (q *Query) TryDecrypt(id crypto.PrivKey) (*DecodedQuery, error) {
@@ -34,7 +34,7 @@ func (q *Query) TryDecrypt(id crypto.PrivKey) (*DecodedQuery, error) {
 		return nil, err
 	}
 	dcoder := cbor.NewDecoder(out)
-	sr := req{}
+	sr := serializedRequest{}
 	if err := dcoder.Decode(&sr); err != nil {
 		return nil, err
 	}
@@ -43,9 +43,9 @@ func (q *Query) TryDecrypt(id crypto.PrivKey) (*DecodedQuery, error) {
 		return nil, err
 	}
 	return &DecodedQuery{
-		Resource:          q.Resource,
-		Repo:              &repo,
-		serializedRequest: sr,
+		Resource: q.Resource,
+		Repo:     &repo,
+		Request:  sr,
 	}, nil
 }
 
@@ -75,28 +75,6 @@ func ReadQuery(r io.Reader) (*Query, error) {
 
 }
 
-// DomainHash provides the canonical query of `GET /` for a root domain
-func (dq *DecodedQuery) DomainHash() cid.Cid {
-	u, _ := url.Parse(dq.serializedRequest.URL)
-	base := u.Scheme + "://" + u.Host + "/"
-	canonical := req{
-		Method: "GET",
-		URL:    base,
-		Headers: []string{
-			"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-			"Host: " + u.Host,
-			"Cache-Control: no-cache",
-			"Referer: " + base,
-			"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/1 Firefox/1",
-		},
-		Body: []byte{},
-	}
-	buf := bytes.NewBuffer(nil)
-	cbor.Encode(buf, canonical)
-	mh, _ := multihash.Sum(buf.Bytes(), multihash.SHA2_256, -1)
-	return cid.NewCidV1(uint64(mc.Https), mh)
-}
-
 func (dq *DecodedQuery) EncryptTo(p peer.ID) (*Query, error) {
 	lr := agep2p.NewLibP2PRecipient(p)
 	out := bytes.NewBuffer(nil)
@@ -104,7 +82,7 @@ func (dq *DecodedQuery) EncryptTo(p peer.ID) (*Query, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := cbor.Encode(stream, dq.serializedRequest); err != nil {
+	if err := cbor.Encode(stream, dq.Request); err != nil {
 		return nil, err
 	}
 	if err := cbor.Encode(stream, dq.Repo); err != nil {
@@ -124,4 +102,11 @@ func (dq *DecodedQuery) EncryptTo(p peer.ID) (*Query, error) {
 
 func (dq *DecodedQuery) Cid() cid.Cid {
 	return dq.Resource
+}
+
+func DecodedQueryFromRequest(sr serializedRequest) (*DecodedQuery, error) {
+	return &DecodedQuery{
+		Resource: cid.Undef,
+		Request:  sr,
+	}, nil
 }

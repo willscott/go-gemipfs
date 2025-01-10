@@ -1,12 +1,15 @@
 gemipfs is an experimental content-addressed transport & privacy layer for {gemini, http}
 
 Query:
-HTTP Request gets hashed to a Request CID.
-Request CID gets hashed to a QueryCID.
+HTTP Request gets hashed to a "RequestCID".
+Request CID has a derived-hash of a QueryCID.
 
-Response:
-HTTP Response (encrypted to Request CID)
-+ UCAN Attestation(QueryCID is filled by Response)
+Caching check:
+The client asks about a QueryCID against known attestions mapping that QueryCID to known response objects.
+
+Response object looks like:
+HTTP Response (encrypted to RequestCID)
++ Attestation("QueryCID is answered by ResponseCID")
 
 
 Setup:
