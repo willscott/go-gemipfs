@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"net/http/httputil"
+	"os"
 	"time"
 
 	"github.com/CorentinB/warc"
@@ -19,11 +20,9 @@ import (
 )
 
 type Response struct {
-	Query      *Request
-	Status     string
-	StatusCode int
-	Headers    []string
-	Body       []byte
+	Query      cid.Cid
+	req        *Request
+	Transcript []byte
 }
 
 func (r *Response) Write(w io.Writer) error {
@@ -31,9 +30,9 @@ func (r *Response) Write(w io.Writer) error {
 	if err := cbor.Encode(buf, r); err != nil {
 		return err
 	}
-	sk := sha256.New().Sum(r.Query.Cid.Hash())
+	sk := sha256.New().Sum(r.Query.Hash())
 	skf := (*[32]byte)(sk)
-	nonce := sha256.New().Sum(append([]byte("nonce"), r.Query.Cid.Hash()...))
+	nonce := sha256.New().Sum(append([]byte("nonce"), r.Query.Hash()...))
 	noncef := (*[24]byte)(nonce)
 	enc := box.SealAfterPrecomputation([]byte{}, buf.Bytes(), noncef, skf)
 	_, err := w.Write(enc)
@@ -46,18 +45,16 @@ func (r *Response) Expiry() time.Duration {
 }
 
 func (r *Response) Serialize() (cid.Cid, []byte) {
-	buf := bytes.NewBuffer(nil)
-	if err := cbor.Encode(buf, r); err != nil {
-		return cid.Undef, []byte{}
-	}
-	sk := sha256.New().Sum(r.Query.Cid.Hash())
+	sk := sha256.New().Sum(r.Query.Hash())
 	skf := (*[32]byte)(sk)
-	nonce := sha256.New().Sum(append([]byte("nonce"), r.Query.Cid.Hash()...))
+	nonce := sha256.New().Sum(append([]byte("nonce"), r.Query.Hash()...))
 	noncef := (*[24]byte)(nonce)
-	enc := box.SealAfterPrecomputation([]byte{}, buf.Bytes(), noncef, skf)
+	enc := box.SealAfterPrecomputation([]byte{}, r.Transcript, noncef, skf)
 
 	mh, _ := multihash.Sum(enc, multihash.SHA2_256, -1)
 	c := cid.NewCidV1(uint64(mc.Https), mh)
+
+	fmt.Printf("sealed %s with shared key %+x", c, skf)
 
 	return c, enc
 }
@@ -72,36 +69,19 @@ func ReadResponse(query cid.Cid, r io.Reader) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	stream, ok := box.OpenAfterPrecomputation([]byte{}, buf, noncef, skf)
+	transcript, ok := box.OpenAfterPrecomputation([]byte{}, buf, noncef, skf)
 	if !ok {
-		return nil, fmt.Errorf("failed to decrypt")
+		return nil, fmt.Errorf("failed to decrypt %s usking shared key %+x", query, skf)
 	}
 
-	d := cbor.NewDecoder(bytes.NewReader(stream))
 	rsp := Response{}
-	if err := d.Decode(&rsp); err != nil {
-		return nil, err
-	}
+	rsp.Query = query
+	rsp.Transcript = transcript
 	return &rsp, nil
 }
 
-func (r *Response) HTTP(req *http.Request) *http.Response {
-	hr := http.Response{
-		Status:     r.Status,
-		StatusCode: r.StatusCode,
-		Header:     make(http.Header),
-		Body:       &bufRC{bytes.NewReader(r.Body)},
-		Request:    req,
-	}
-	for _, h := range r.Headers {
-		kv := strings.SplitN(h, ":", 2)
-		hr.Header.Add(kv[0], kv[1])
-	}
-	return &hr
-}
-
-func ResponseFromWARC(httpReq *http.Request, respArc []byte) (*Response, error) {
-	ncr := io.NopCloser(bytes.NewReader(respArc))
+func (r *Response) HTTP(req *http.Request) (*http.Response, error) {
+	ncr := io.NopCloser(bytes.NewReader(r.Transcript))
 	reader, err := warc.NewReader(ncr)
 	if err != nil {
 		return nil, err
@@ -111,33 +91,54 @@ func ResponseFromWARC(httpReq *http.Request, respArc []byte) (*Response, error) 
 		return nil, err
 	}
 
-	httpResp, err := http.ReadResponse(bufio.NewReader(rcrd.Content), httpReq)
+	return http.ReadResponse(bufio.NewReader(rcrd.Content), req)
+}
+
+func ResponseFromWARC(q cid.Cid, httpReq *http.Request, respArc []byte) (*Response, error) {
+	req, err := Wrap(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	return &Response{
+		Query:      q,
+		req:        req,
+		Transcript: respArc,
+	}, nil
+}
+
+func ResponseFrom(q cid.Cid, r *Request, hr *http.Response) (*Response, error) {
+	dumpResponse, err := httputil.DumpResponse(hr, true)
 	if err != nil {
 		return nil, err
 	}
 
-	req := &Request{
-		Cid:     cid.Undef,
-		Request: httpReq,
+	rw := bytes.NewReader(dumpResponse)
+	digest := "sha1:" + warc.GetSHA1(rw)
+	respArc := warc.NewRecord(os.TempDir(), false)
+	respArc.Header.Set("WARC-Type", "response")
+	respArc.Header.Set("WARC-Payload-Digest", digest)
+	respArc.Header.Set("WARC-Block-Digest", digest)
+	respArc.Header.Set("WARC-Target-URI", r.URL.String())
+	respArc.Header.Set("WARC-Date", r.Time.UTC().Format(time.RFC3339Nano))
+	respArc.Header.Set("WARC-Record-ID", "<urn:uuid:"+r.UUID.String()+">")
+	respArc.Header.Set("Host", r.URL.Host)
+	respArc.Header.Set("Content-Type", "application/http; msgtype=response")
+	respArc.Content.Write(dumpResponse)
+
+	buf := bytes.NewBuffer(nil)
+	writer := &warc.Writer{
+		FileName:    "",
+		Compression: "",
+		FileWriter:  bufio.NewWriter(buf),
 	}
-	return ResponseFrom(req, httpResp), nil
-}
-
-func ResponseFrom(r *Request, hr *http.Response) *Response {
-	var headerLines []string
-	body, _ := io.ReadAll(hr.Body)
-
-	for k, v := range hr.Header {
-		for _, vv := range v {
-			headerLines = append(headerLines, fmt.Sprintf("%s:%s", k, vv))
-		}
+	_, err = writer.WriteRecord(respArc)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Response{
-		Query:      r,
-		Status:     hr.Status,
-		StatusCode: hr.StatusCode,
-		Headers:    headerLines,
-		Body:       body,
-	}
+		Query:      q,
+		req:        r,
+		Transcript: buf.Bytes(),
+	}, nil
 }

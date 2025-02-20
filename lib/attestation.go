@@ -1,9 +1,13 @@
 package gemipfs
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log"
+
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p/core/crypto"
-	"github.com/polydawn/refmt/cbor"
 )
 
 type Attester struct {
@@ -18,25 +22,28 @@ type Attestation struct {
 
 func (a *Attester) AttestResponse(r *Response) (*Attestation, []byte) {
 	rCid, rBody := r.Serialize()
-	s, _ := a.Identity.Sign(append(r.Query.Cid.Bytes(), rCid.Bytes()...))
+	s, _ := a.Identity.Sign(append(r.Query.Bytes(), rCid.Bytes()...))
+	fmt.Printf("attesting %s -> %s\n", r.Query, rCid)
 
 	return &Attestation{
-		Req:  r.Query.Cid,
+		Req:  r.Query,
 		Resp: rCid,
 		Sig:  s,
 	}, rBody
 }
 
 func (a *Attestation) Bytes() []byte {
-	b, err := cbor.Marshal(a)
+	buf := bytes.NewBuffer(nil)
+	err := json.NewEncoder(buf).Encode(a)
 	if err != nil {
+		log.Printf("failed to marshal attestation: %v", err)
 		return []byte{}
 	}
-	return b
+	return buf.Bytes()
 }
 
-func ParseAttestation(b []byte) *Attestation {
+func ParseAttestation(b []byte) (*Attestation, error) {
 	a := Attestation{}
-	_ = cbor.Unmarshal(cbor.DecodeOptions{}, b, &a)
-	return &a
+	err := json.NewDecoder(bytes.NewReader(b)).Decode(&a)
+	return &a, err
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -37,7 +38,8 @@ func main() {
 	storeBaseLoc := path.Join(*storeLoc, ".gemipfs")
 	store := gemipfs.NewCarStore(storeBaseLoc)
 	rConf := router.RouterConfig{
-		Store: store,
+		Store:           store,
+		MemoryCacheSize: 1024,
 	}
 
 	if err := getOrSetCA(); err != nil {
@@ -69,16 +71,20 @@ func main() {
 	proxy.CertStore = NewCertStorage()
 	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		gr := gemipfs.Wrap(req)
+		gr, err := gemipfs.Wrap(req)
+		if err != nil {
+			log.Printf("could not wrap req: %v\n", err)
+			return nil, nil
+		}
 		request, err := gr.Canonicalize().Serialize()
 		if err != nil {
-			log.Fatalf("could not serialize req to peer: %v\n", err)
+			log.Printf("could not serialize req to peer: %v\n", err)
 			return nil, nil
 		}
 		contentSearchKey := gr.DomainHash()
 		query, err := gemipfs.DecodedQueryFromRequest(request)
 		if err != nil {
-			log.Fatalf("couldn't transform query: %v\n", err)
+			log.Printf("couldn't transform query: %v\n", err)
 			return nil, nil
 		}
 
@@ -91,45 +97,82 @@ func main() {
 			// return from an existing repo
 			rb, err := store.Get(storedResp)
 			if err != nil {
-				log.Fatalf("could not retrieve response from store: %v\n", err)
+				log.Printf("could not retrieve response from store: %v\n", err)
 				return nil, nil
 			}
-			gResp, err := gemipfs.ResponseFromWARC(req, rb)
+			gResp, err := gemipfs.ResponseFromWARC(query.Resource, req, rb)
 			if err != nil {
-				log.Fatalf("could not parse response from store: %v\n", err)
+				log.Printf("could not parse response from store: %v\n", err)
 				return nil, nil
 			}
-			return req, gResp.HTTP(req)
+			hResp, err := gResp.HTTP(req)
+			if err != nil {
+				log.Printf("could not convert response to http: %v\n", err)
+				return nil, nil
+			}
+			return req, hResp
 		}
+		log.Printf("going to relay for %s\n", contentSearchKey)
 
 		// no store identified - use an exit to request the page.
 		query.Repo = repoUrl
 		wireQuery, err := query.EncryptTo(peer)
 		if err != nil {
-			log.Fatalf("could not serialize req to peer: %v\n", err)
+			log.Printf("could not serialize req to peer: %v\n", err)
 			return nil, nil
 		}
 		netCtx, netCncl := context.WithCancel(req.Context())
 		defer netCncl()
 		stream, err := host.NewStream(netCtx, peer, "/exit/0.0.1")
 		if err != nil {
-			log.Fatal(err)
+			log.Print(err)
 			return nil, nil
 		}
 		defer stream.Close()
 		if err := wireQuery.Write(stream); err != nil {
-			log.Fatal(err)
+			log.Print(err)
 			return nil, nil
 		}
 		stream.CloseWrite()
 		fmt.Printf("waiting for response for %s\n", req.URL)
 
-		resp, err := gemipfs.ReadResponse(query.Resource, stream)
+		ioR, err := io.ReadAll(stream)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("did not get attestion response for %s\n", req.URL)
 			return nil, nil
 		}
-		return req, resp.HTTP(req)
+		if len(ioR) == 0 {
+			log.Printf("no attestion response for %s\n", req.URL)
+			return nil, nil
+		}
+		attest, err := gemipfs.ParseAttestation(ioR)
+		if err != nil {
+			log.Printf("could not parse response attestation for %s - %v\n", req.URL, err)
+			return nil, nil
+		}
+		//fmt.Printf("got attestation %+v\n", attest)
+		//TODO: validate the attestion.
+
+		// Get resp from repo.
+		log.Printf("resp is at %s\n", repoUrl.String()+"?cid="+attest.Resp.String())
+		encResp, err := http.Get(repoUrl.String() + "?cid=" + attest.Resp.String())
+		if err != nil {
+			log.Printf("could not get response from repo: %v\n", err)
+			return nil, nil
+		}
+
+		resp, err := gemipfs.ReadResponse(attest.Req, encResp.Body)
+		if err != nil {
+			log.Printf("could not parse response from repo: %v\n", encResp)
+			log.Print(err)
+			return nil, nil
+		}
+		hResp, err := resp.HTTP(req)
+		if err != nil {
+			log.Printf("could not convert response to http: %v\n", err)
+			return nil, nil
+		}
+		return req, hResp
 	})
 	proxy.Verbose = *verbose
 	log.Fatal(http.ListenAndServe(*addr, proxy))

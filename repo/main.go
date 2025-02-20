@@ -4,12 +4,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
 	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
 	"github.com/ipld/go-car/v2/blockstore"
+	"github.com/multiformats/go-multicodec"
+	"github.com/multiformats/go-multihash"
 )
 
 type Repo struct {
@@ -76,6 +79,7 @@ func (repo *Repo) repo(r http.ResponseWriter, req *http.Request) {
 			r.WriteHeader(404)
 			return
 		}
+		log.Printf("get %s (resp is %d bytes)\n", blk.Cid().String(), len(blk.RawData()))
 		r.WriteHeader(200)
 		r.Write(blk.RawData())
 	} else if req.Method == "POST" {
@@ -84,9 +88,16 @@ func (repo *Repo) repo(r http.ResponseWriter, req *http.Request) {
 			r.WriteHeader(406)
 			return
 		}
-		blk := blocks.NewBlock(blkb)
+		v1b := cid.V1Builder{
+			Codec:    uint64(multicodec.Https),
+			MhType:   multihash.SHA2_256,
+			MhLength: -1,
+		}
+		c1, _ := v1b.Sum(blkb)
+		blk, _ := blocks.NewBlockWithCid(blkb, c1)
 		repo.bs.Put(req.Context(), blk)
 		r.WriteHeader(200)
+		log.Printf("post %s\n", blk.Cid().String())
 		r.Write(blk.Cid().Bytes())
 	} else {
 		r.WriteHeader(406)

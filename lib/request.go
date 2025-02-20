@@ -19,23 +19,22 @@ import (
 )
 
 type Request struct {
-	cid.Cid
 	time.Time
 	uuid.UUID
 	*http.Request
 }
 
-func Wrap(r *http.Request) *Request {
-	return &Request{
-		cid.Undef,
+func Wrap(hr *http.Request) (*Request, error) {
+	r := &Request{
 		time.Now(),
 		uuid.New(),
-		r,
+		hr,
 	}
+	return r, nil
 }
 
 // serializable request
-type serializedRequest []byte
+type SerializedRequest []byte
 
 type bufRC struct{ *bytes.Reader }
 
@@ -46,7 +45,7 @@ func (brc *bufRC) Read(b []byte) (int, error) {
 	return brc.Reader.Read(b)
 }
 
-func (r *Request) Serialize() (serializedRequest, error) {
+func (r *Request) Serialize() (SerializedRequest, error) {
 	dumpRequest, err := httputil.DumpRequest(r.Request, true)
 	if err != nil {
 		return nil, err
@@ -86,7 +85,7 @@ func (r *Request) Canonicalize() *Request {
 	return r
 }
 
-func ParseRequest(ctx context.Context, sr serializedRequest) (*Request, error) {
+func ParseRequest(ctx context.Context, sr SerializedRequest) (*Request, error) {
 	brc := bufRC{bytes.NewReader(sr)}
 	reader, err := warc.NewReader(&brc)
 	if err != nil {
@@ -97,7 +96,11 @@ func ParseRequest(ctx context.Context, sr serializedRequest) (*Request, error) {
 		return nil, err
 	}
 
-	hr, err := http.ReadRequest(bufio.NewReader(rcrd.Content))
+	reqTmpl, err := http.ReadRequest(bufio.NewReader(rcrd.Content))
+	if err != nil {
+		return nil, err
+	}
+	hr, err := http.NewRequestWithContext(ctx, reqTmpl.Method, reqTmpl.URL.String(), reqTmpl.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -120,20 +123,19 @@ func ParseRequest(ctx context.Context, sr serializedRequest) (*Request, error) {
 	}
 
 	return &Request{
-		Cid:     cid.Undef,
 		Time:    dt,
 		UUID:    uuid,
 		Request: hr,
 	}, nil
 }
 
-func (r *Request) Do(c http.Client) (*Response, error) {
+func (r *Request) Do(q cid.Cid, c *http.Client) (*Response, error) {
 	hr, err := c.Do(r.Request)
 	if err != nil {
 		return nil, err
 	}
 
-	return ResponseFrom(r, hr), nil
+	return ResponseFrom(q, r, hr)
 }
 
 func (r *Request) DomainHash() cid.Cid {

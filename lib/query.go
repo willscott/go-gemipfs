@@ -23,7 +23,7 @@ type Query struct {
 type DecodedQuery struct {
 	Resource cid.Cid
 	Repo     *url.URL
-	Request  serializedRequest
+	Request  SerializedRequest
 }
 
 func (q *Query) TryDecrypt(id crypto.PrivKey) (*DecodedQuery, error) {
@@ -34,17 +34,21 @@ func (q *Query) TryDecrypt(id crypto.PrivKey) (*DecodedQuery, error) {
 		return nil, err
 	}
 	dcoder := cbor.NewDecoder(out)
-	sr := serializedRequest{}
+	sr := SerializedRequest{}
 	if err := dcoder.Decode(&sr); err != nil {
 		return nil, err
 	}
-	repo := url.URL{}
-	if err := dcoder.Decode(&repo); err != nil {
+	rs := ""
+	if err := dcoder.Decode(&rs); err != nil {
+		return nil, err
+	}
+	rsu, err := url.Parse(rs)
+	if err != nil {
 		return nil, err
 	}
 	return &DecodedQuery{
 		Resource: q.Resource,
-		Repo:     &repo,
+		Repo:     rsu,
 		Request:  sr,
 	}, nil
 }
@@ -85,7 +89,7 @@ func (dq *DecodedQuery) EncryptTo(p peer.ID) (*Query, error) {
 	if err := cbor.Encode(stream, dq.Request); err != nil {
 		return nil, err
 	}
-	if err := cbor.Encode(stream, dq.Repo); err != nil {
+	if err := cbor.Encode(stream, dq.Repo.String()); err != nil {
 		return nil, err
 	}
 	stream.Close()
@@ -104,7 +108,7 @@ func (dq *DecodedQuery) Cid() cid.Cid {
 	return dq.Resource
 }
 
-func DecodedQueryFromRequest(sr serializedRequest) (*DecodedQuery, error) {
+func DecodedQueryFromRequest(sr SerializedRequest) (*DecodedQuery, error) {
 	return &DecodedQuery{
 		Resource: cid.Undef,
 		Request:  sr,

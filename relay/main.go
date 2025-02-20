@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"time"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -61,22 +62,30 @@ func main() {
 func doExit(a *gemipfs.Attester, s network.Stream) {
 	q, err := gemipfs.ReadQuery(s)
 	if err != nil {
+		log.Printf("could not read query: %v", err)
 		return
 	}
 	dq, err := q.TryDecrypt(a.Identity)
 	if err != nil {
+		log.Printf("could not decrypt query: %v", err)
 		return
 	}
 
-	req, err := gemipfs.ParseRequest(context.Background(), dq.Request)
+	ctx, cncl := context.WithTimeout(context.Background(), 10*time.Second)
+	req, err := gemipfs.ParseRequest(ctx, dq.Request)
 	if err != nil {
+		cncl()
+		log.Printf("could not read request: %v", err)
 		return
 	}
 	fmt.Printf("going to req %s\n", req.URL)
-	resp, err := req.Do(*http.DefaultClient)
+	resp, err := req.Do(q.Resource, http.DefaultClient)
 	if err != nil {
+		cncl()
+		log.Printf("could not fetch request: %v", err)
 		return
 	}
+	cncl()
 	fmt.Printf("finished request for %s\n", req.URL)
 	prf, respBody := a.AttestResponse(resp)
 	// push reponse to repo
@@ -89,5 +98,9 @@ func doExit(a *gemipfs.Attester, s network.Stream) {
 
 	// respond with attestation
 	defer s.Close()
-	s.Write(prf.Bytes())
+	_, err = s.Write(prf.Bytes())
+	if err != nil {
+		log.Printf("failed to write attestation: %v", err)
+		return
+	}
 }
