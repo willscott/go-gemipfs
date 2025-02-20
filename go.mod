@@ -3,7 +3,7 @@ module github.com/willscott/go-gemipfs
 go 1.23.2
 
 require (
-	filippo.io/age v1.2.0
+	filippo.io/age v1.2.1
 	github.com/CorentinB/warc v0.8.57
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0
 	github.com/elazarl/goproxy v0.0.0-20240909085733-6741dbfc16a1
